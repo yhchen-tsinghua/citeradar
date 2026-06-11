@@ -37,6 +37,8 @@ from typing import Optional
 from collections import Counter
 import requests
 
+from .errors import RateLimitError
+
 
 # ---------------------------------------------------------------------------
 # ISO 3166-1 alpha-2 → country name
@@ -148,8 +150,14 @@ def _api_get(session: requests.Session, url: str, params: dict = {}) -> Optional
             print("      [rate-limit] waiting 20 s…")
             time.sleep(20)
             resp = session.get(url, params=params, timeout=12)
+            if resp.status_code == 429:
+                raise RateLimitError(f"API rate limit while fetching {url}")
         if resp.status_code == 200:
             return resp.json()
+    except RateLimitError:
+        raise
+    except requests.RequestException as e:
+        raise RateLimitError(f"API request failed while fetching {url}: {e}") from e
     except Exception as e:
         print(f"      [error] {e}")
     return None
@@ -173,7 +181,17 @@ def _get_institution_city(inst_id: str, session: requests.Session) -> str:
     )
     try:
         resp = session.get(api_url, params={"mailto": OPENALEX_EMAIL}, timeout=12)
+        if resp.status_code == 429:
+            print("      [rate-limit] waiting 20 s…")
+            time.sleep(20)
+            resp = session.get(api_url, params={"mailto": OPENALEX_EMAIL}, timeout=12)
+            if resp.status_code == 429:
+                raise RateLimitError(f"API rate limit while fetching {api_url}")
         city = resp.json().get("geo", {}).get("city", "") if resp.status_code == 200 else ""
+    except RateLimitError:
+        raise
+    except requests.RequestException as e:
+        raise RateLimitError(f"API request failed while fetching {api_url}: {e}") from e
     except Exception:
         city = ""
 
@@ -305,8 +323,44 @@ def _crossref_lookup(title: str, session: requests.Session) -> list[AuthorRecord
 # Public API
 # ---------------------------------------------------------------------------
 
+def _author_from_dict(data: dict) -> AuthorRecord:
+    fields = AuthorRecord.__dataclass_fields__
+    return AuthorRecord(**{k: data.get(k, "") for k in fields})
+
+
+def _citation_key(citation: dict) -> str:
+    return f"{citation.get('title', '')}|{citation.get('cited_paper_title', '')}"
+
+
+def _load_author_checkpoint(json_path: str) -> tuple[list[AuthorRecord], list[str], list[str]]:
+    if not json_path:
+        return [], [], []
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return [], [], []
+
+    records = [
+        _author_from_dict(a)
+        for a in data.get("authors", [])
+        if isinstance(a, dict)
+    ]
+    not_found = data.get("papers_not_found", [])
+    processed = data.get("processed_citations", [])
+    if not processed:
+        processed = [
+            f"{r.citing_paper_title}|{r.cited_paper_title}"
+            for r in records
+            if r.citing_paper_title
+        ]
+    return records, not_found, processed
+
+
 def build_author_profiles(citations_data: dict,
-                           session: requests.Session) -> tuple[list[AuthorRecord], list[str]]:
+                           session: requests.Session,
+                           json_path: str = "",
+                           csv_path: str = "") -> tuple[list[AuthorRecord], list[str]]:
     """
     Resolve full author metadata for every unique citing paper.
 
@@ -335,13 +389,23 @@ def build_author_profiles(citations_data: dict,
     print(f"Unique citing-paper entries : {len(unique)}")
     print("Resolving authors via OpenAlex → Semantic Scholar → CrossRef\n")
 
-    all_records: list[AuthorRecord] = []
-    not_found:   list[str]          = []
+    all_records, not_found, processed_citations = _load_author_checkpoint(json_path)
+    processed = set(processed_citations)
+
+    if processed:
+        print(f"Resuming authors: {len(processed)} citing-paper entries already processed.\n")
 
     for i, paper in enumerate(unique, 1):
         title       = paper["title"]
         year        = paper.get("year", "")
         cited_title = paper["cited_paper_title"]
+        key         = _citation_key(paper)
+
+        if key in processed:
+            print(f"[{i:>3}/{len(unique)}] {title[:80]}")
+            print("        already processed — skipping")
+            continue
+
         print(f"[{i:>3}/{len(unique)}] {title[:80]}")
 
         records = _openalex_lookup(title, session)
@@ -364,30 +428,49 @@ def build_author_profiles(citations_data: dict,
             print("        → not found in any source")
             not_found.append(title)
 
+        processed.add(key)
+        processed_citations.append(key)
+        if json_path and csv_path:
+            save_author_profiles(all_records, not_found, json_path, csv_path,
+                                 processed_citations, complete=False,
+                                 quiet=True)
+
+    if json_path and csv_path:
+        save_author_profiles(all_records, not_found, json_path, csv_path,
+                             processed_citations, complete=True)
+
     return all_records, not_found
 
 
 def save_author_profiles(all_records: list[AuthorRecord], not_found: list[str],
-                          json_path: str, csv_path: str) -> None:
+                          json_path: str, csv_path: str,
+                          processed_citations: Optional[list[str]] = None,
+                          complete: bool = True,
+                          quiet: bool = False) -> None:
     """Persist author profile data to JSON and CSV."""
+    processed_citations = list(dict.fromkeys(processed_citations or []))
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "total_author_records": len(all_records),
+                "complete":             complete,
+                "processed_citations":  processed_citations,
                 "papers_not_found":     not_found,
                 "authors":              [asdict(r) for r in all_records],
             },
             f, ensure_ascii=False, indent=2,
         )
-    if all_records:
-        fields = list(asdict(all_records[0]).keys())
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(asdict(r) for r in all_records)
+    fields = list(AuthorRecord.__dataclass_fields__.keys())
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(asdict(r) for r in all_records)
 
-    print(f"\nAuthor profiles saved → {json_path}, {csv_path}")
-    country_counts = Counter(r.country or "Unknown" for r in all_records if r.country)
-    print("\nTop countries:")
-    for country, count in country_counts.most_common(10):
-        print(f"  {count:>4}  {country}")
+    if quiet:
+        print(f"        checkpoint saved → {json_path}")
+    else:
+        print(f"\nAuthor profiles saved → {json_path}, {csv_path}")
+        country_counts = Counter(r.country or "Unknown" for r in all_records if r.country)
+        print("\nTop countries:")
+        for country, count in country_counts.most_common(10):
+            print(f"  {count:>4}  {country}")

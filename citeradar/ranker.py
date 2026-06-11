@@ -44,6 +44,8 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 import requests
 
+from .errors import RateLimitError
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -96,8 +98,14 @@ def _api_get(session: requests.Session, url: str, params: dict = {}) -> Optional
             print("    [rate-limit] waiting 20 s…")
             time.sleep(20)
             resp = session.get(url, params=params, timeout=12)
+            if resp.status_code == 429:
+                raise RateLimitError(f"API rate limit while fetching {url}")
         if resp.status_code == 200:
             return resp.json()
+    except RateLimitError:
+        raise
+    except requests.RequestException as e:
+        raise RateLimitError(f"API request failed while fetching {url}: {e}") from e
     except Exception as e:
         print(f"    [error] {e}")
     return None
