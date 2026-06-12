@@ -45,6 +45,7 @@ from typing import Optional
 import requests
 
 from .errors import RateLimitError
+from .proxy import make_session
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +374,8 @@ def _save(records: list, json_path: str, csv_path: str) -> None:
 
 def run_rankings(authors_data: dict,
                  cit_json: str, cit_csv: str,
-                 hidx_json: str, hidx_csv: str) -> tuple[list[CitationRank], list[HIndexRank]]:
+                 hidx_json: str, hidx_csv: str,
+                 proxy_pool=None) -> tuple[list[CitationRank], list[HIndexRank]]:
     """
     Build both rankings from the author-profile JSON produced by the profiler.
 
@@ -400,7 +402,7 @@ def run_rankings(authors_data: dict,
 
     print("\n" + "=" * 60)
     print("Looking up h-index via OpenAlex…\n")
-    session      = requests.Session()
+    session      = make_session(proxy_pool)
     hindex_ranks = build_hindex_ranking(cit_ranks, session)
     print(f"\nTop 10 by h-index:")
     for r in hindex_ranks[:10]:

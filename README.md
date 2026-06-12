@@ -95,7 +95,7 @@ pip install citeradar
 
 **Requirements:** Python 3.9+
 
-Dependencies are installed automatically: `requests`, `beautifulsoup4`, `folium`, `geopy`, `lxml`
+Dependencies are installed automatically: `requests[socks]`, `beautifulsoup4`, `folium`, `geopy`, `lxml`, `PyYAML`
 
 ---
 
@@ -112,6 +112,7 @@ citeradar <SCHOLAR_ID> [options]
 | `--outdir DIR` | Save output folder to a specific directory (default: current directory) |
 | `--no-enrich` | Skip CrossRef author enrichment (faster, slightly fewer complete author lists) |
 | `--no-hindex` | Skip h-index lookup (much faster; citation-count ranking still produced) |
+| `--proxy-config PATH` | YAML file defining rotating proxies for Requests-based API calls |
 
 ### Examples
 
@@ -124,7 +125,25 @@ citeradar i1H5XQ8AAAAJ --no-hindex
 
 # Save to a specific folder
 citeradar i1H5XQ8AAAAJ --outdir /path/to/my/research
+
+# Rotate requests through proxies
+citeradar i1H5XQ8AAAAJ --proxy-config proxies.yaml
 ```
+
+Example proxy configuration:
+
+```yaml
+PROXY_ID_1:
+  - http: "socks5h:127.0.0.1:1080"
+    https: "socks5h:127.0.0.1:1080"
+  - http: "socks5h:127.0.0.1:1081"
+PROXY_ID_2:
+  - https: "socks5h:127.0.0.1:2080"
+```
+
+CiteRadar rotates across top-level proxy IDs for Requests-based calls
+(Google Scholar, CrossRef, OpenAlex, Semantic Scholar), and randomly chooses
+one local endpoint within each proxy ID. Nominatim geocoding is not proxied.
 
 You can also run it as a module:
 ```bash
@@ -188,6 +207,7 @@ If an author's institution is unknown, only h-index ≤ 20 is accepted to preven
 | Google Scholar | Realistic Chrome User-Agent; 2s delay between requests; 30s back-off on HTTP 429 |
 | OpenAlex | `mailto=` polite-pool; 1s delay; 20s back-off on 429 |
 | CrossRef | Proper User-Agent with contact email; used only when needed |
+| Optional proxies | Rotate Requests-based calls across configured proxy IDs |
 | Nominatim | 1.1s between requests (OSM policy); module-level cache |
 
 ---

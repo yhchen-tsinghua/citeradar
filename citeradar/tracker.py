@@ -29,6 +29,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .errors import RateLimitError
+from .proxy import make_session
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +392,8 @@ def _load_citation_checkpoint(json_path: str, enrich: bool) -> tuple[
 
 def track_citations(papers_data: dict, enrich: bool = True,
                     author_name: str = "", json_path: str = "",
-                    csv_path: str = "") -> tuple[list[CitingPaper], list[dict]]:
+                    csv_path: str = "",
+                    proxy_pool=None) -> tuple[list[CitingPaper], list[dict]]:
     """
     For each paper in ``papers_data["papers"]`` that has citations, fetch all
     citing papers from Google Scholar.
@@ -415,7 +417,7 @@ def track_citations(papers_data: dict, enrich: bool = True,
     print(f"Papers with citations: {len(cited_papers)} / {len(papers)}")
     print(f"CrossRef author enrichment: {'enabled' if enrich else 'disabled'}\n")
 
-    session = requests.Session()
+    session = make_session(proxy_pool)
     all_citing, summary, processed_papers, in_progress = _load_citation_checkpoint(
         json_path, enrich
     )

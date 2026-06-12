@@ -14,6 +14,8 @@ Usage
       --no-enrich   Skip CrossRef author enrichment (faster, fewer details)
       --no-hindex   Skip OpenAlex h-index look-up  (fastest, no rankings)
       --outdir DIR  Parent directory for the output folder (default: current dir)
+      --proxy-config PATH
+                    YAML file defining rotating Requests proxies
 
 Output folder structure
 -----------------------
@@ -35,7 +37,6 @@ import json
 import os
 import re
 import sys
-import requests
 
 from .scraper  import scrape_profile, save_papers
 from .tracker  import track_citations
@@ -43,6 +44,7 @@ from .profiler import build_author_profiles
 from .ranker   import run_rankings
 from .reporter import generate_report
 from .errors   import RateLimitError
+from .proxy    import ProxyConfigError, load_proxy_pool, make_session
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +111,8 @@ def _is_complete(data: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def run_pipeline(scholar_id: str, outdir: str,
-                 enrich: bool, compute_hindex: bool) -> None:
+                 enrich: bool, compute_hindex: bool,
+                 proxy_pool=None) -> None:
     """
     Execute the full CiteRadar pipeline for a single Scholar profile.
 
@@ -119,6 +122,7 @@ def run_pipeline(scholar_id: str, outdir: str,
     outdir         : parent directory; the researcher's sub-folder is created here
     enrich         : whether to call CrossRef to complete truncated author lists
     compute_hindex : whether to run the OpenAlex h-index look-up stage
+    proxy_pool     : optional rotating proxy pool for Requests-based calls
     """
 
     # ── Stage 1: scrape researcher's own papers ────────────────────────────
@@ -132,7 +136,7 @@ def run_pipeline(scholar_id: str, outdir: str,
         author_name = author_info.get("name", scholar_id)
         print(f"  Reusing completed papers.json from: {folder}")
     else:
-        author_info, papers = scrape_profile(scholar_id)
+        author_info, papers = scrape_profile(scholar_id, proxy_pool=proxy_pool)
         if not papers:
             print("[ERROR] No papers found.  The profile may be private or "
                   "Scholar returned a CAPTCHA.  Aborting.")
@@ -172,6 +176,7 @@ def run_pipeline(scholar_id: str, outdir: str,
         all_citing, summary = track_citations(
             papers_data, enrich=enrich, author_name=author_name,
             json_path=citations_json, csv_path=citations_csv,
+            proxy_pool=proxy_pool,
         )
         citations_data = _load_json(citations_json)
         if not all_citing:
@@ -197,7 +202,7 @@ def run_pipeline(scholar_id: str, outdir: str,
     if _is_complete(authors_data):
         print(f"  Reusing completed authors.json from: {folder}")
     else:
-        session = requests.Session()
+        session = make_session(proxy_pool)
         all_records, not_found = build_author_profiles(
             citations_data, session, authors_json, authors_csv,
         )
@@ -227,7 +232,8 @@ def run_pipeline(scholar_id: str, outdir: str,
         print("[INFO] h-index ranking skipped (--no-hindex flag set).")
         hidx_json = hidx_csv = None
     else:
-        run_rankings(authors_data, cit_json, cit_csv, hidx_json, hidx_csv)
+        run_rankings(authors_data, cit_json, cit_csv, hidx_json, hidx_csv,
+                     proxy_pool=proxy_pool)
 
     # ── Stage 5: summary + map ───────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -285,16 +291,25 @@ def main() -> None:
         default=".",
         help="Parent directory for the output folder (default: current directory)",
     )
+    parser.add_argument(
+        "--proxy-config",
+        help="YAML file defining rotating Requests proxies",
+    )
 
     args = parser.parse_args()
 
     try:
+        proxy_pool = load_proxy_pool(args.proxy_config) if args.proxy_config else None
         run_pipeline(
             scholar_id     = args.scholar_id,
             outdir         = args.outdir,
             enrich         = not args.no_enrich,
             compute_hindex = not args.no_hindex,
+            proxy_pool     = proxy_pool,
         )
+    except ProxyConfigError as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
     except RateLimitError as e:
         print("\n[PAUSED] " + str(e))
         print("Progress saved. Rerun the same command later to resume.")
